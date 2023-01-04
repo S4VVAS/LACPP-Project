@@ -4,12 +4,14 @@
 %____________________LOOP__________________
 
 init() ->
-    loop(orddice:new(), gb_trees:empty()).
+    loop(merkelTree:empty()).
 
-loop(Files, Tree) ->
+loop(Tree) ->
     receive
+        {init_tree, New_tree} ->
+            loop(New_tree);
         {add_local, Data} ->
-            ok;
+            loop(merkelTree:add(Data, Tree));
         {add_global, Data, Hash} ->
             ok;
         {remove_local, Data} ->
@@ -20,5 +22,5 @@ loop(Files, Tree) ->
             ok;
         {count} ->
             ok;
-        _ -> loop(Files, Tree)
+        _ -> loop(Tree)
     end.
