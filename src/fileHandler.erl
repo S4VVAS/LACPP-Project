@@ -11,7 +11,9 @@ loop(Tree) ->
         {init_tree, New_tree} ->
             loop(New_tree);
         {add_local, Data} ->
-            loop(merkelTree:add(Data, Tree));
+            New_tree = merkelTree:add(Data, Tree),
+            comService ! {New_tree, added_local},
+            loop(New_tree);
         {add_global, Data, Hash} ->
             ok;
         {remove_local, Data} ->

@@ -15,7 +15,11 @@ loop(DB) ->
         % add operation coming from the UI
         {Sender, add_local, Data} ->
             DB ! {add_local, Data},
-            Sender ! {add, ok},
+                receive
+                    {Tree, added_local} -> Sender ! {Tree, added}
+                after
+                    1000 -> timeout
+                end,
             loop(DB);
         % add operation coming from another client
         {Sender, add_global, Hash_tree, Add_hash} ->
