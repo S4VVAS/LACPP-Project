@@ -25,7 +25,7 @@ loop(DB, UI) ->
             end,
             loop(DB, UI);
         % add operation coming from another client
-        {Sender, add_global, Hash, Root} ->
+        {add_global, Hash, Root} ->
             DB ! {add_global, Hash, Root},
             receive
                 % TODO: Also tell sender about failure

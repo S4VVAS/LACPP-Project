@@ -1,5 +1,15 @@
 -module(ui).
 -compile(export_all).
+% ------------------------
+% How to use:
+% 1. Start a terminal:
+%  a. $erl -sname nameServer
+%  b. > nameServer:start().
+% 2. Start N amounts of terminals:
+%  a. $erl -sname some_name
+%  b. > ui:start().
+% 3. Add nodes by: > ui:add("something")
+% ------------------------
 
 % Start a new client. This action creates a comService and register it locally.
 %
