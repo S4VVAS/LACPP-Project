@@ -4,8 +4,8 @@
 % TODO: Change 'mainFrame@pop-os' to something static
 init(UI) ->
     % Disabled for now
-    %% net_kernel:connect_node('nameServer@pop-os'),
-    %% {nameServer, 'nameServer@pop-os'} ! {node(), connected},
+    net_kernel:connect_node('nameServer@pop-os'),
+    {nameServer, 'nameServer@pop-os'} ! {node(), connected},
     DB = spawn_link(fileHandler, init, []),
     loop(DB, UI).
 
@@ -18,8 +18,8 @@ loop(DB, UI) ->
             receive
                 % Send reply to UI and tell all other nodes about the new hash and root (for validation)
                 {added_succ, Hash, Root} ->
-                    Sender ! {added, Root}
-                    %[{comService, User} ! {add_global, Hash, Root} || User <- nodes()]
+                    Sender ! {added, Root},
+                    [{comService, User} ! {add_global, Hash, Root} || User <- nodes()]
             after
                 1000 -> Sender ! timeout
             end,
@@ -38,7 +38,7 @@ loop(DB, UI) ->
             end,
             loop(DB, UI);
         {Self, accepted} ->
-            io:format("You are now connected"),
+            io:format("You are now connected ~n"),
             loop(DB, UI);
         _ -> UI ! error
     end.
