@@ -11,7 +11,7 @@
 % 3. Add nodes by: > ui:add("something")
 % ------------------------
 
-% Start a new client. This action creates a comService and register it locally.
+% Start a new client. This action creates a comService and register it locally and connects to the cluster.
 %
 % Example: >> ui:start()
 start() ->
@@ -24,14 +24,26 @@ start() ->
 
 % Adds data to the database
 %
-% Example: >> ui:add("hello world")
-add(Data) ->
-    comService ! {self(), add_local, term_to_binary(Data)},
+% Example: >> ui:add(file1, "hello world")
+add(File, Data) ->
+    comService ! {add_local, self(), list_to_binary(File), list_to_binary(Data)},
     receive
-        {added, Root} -> {added, Root, bit_size(Root)};
+        {added, Root} -> {added, bit_size(Root)}; % TODO: For testing only, to see the root size actually changes
+        _  -> timeout_from_db % Means the fileHandler failed to communicate
+    after
+        2000 -> timeout_from_comService % Means the comService failed to communicate
+    end.
+
+
+% TODO: Known error, even if node doesnt exist in users merkleTree it can be fetched from
+% other nodes whos merkleTree is not synced.
+view(File) ->
+    comService ! {view_local, self(), list_to_binary(File)},
+    receive
+        {view_succ, Data} -> {found, binary_to_list(Data)};
         _  -> timeout_from_db
     after
-        1000 -> timeout_from_comService
+        3000 -> timeout_from_comService
     end.
 
 % A response look to send messages to the user
@@ -39,6 +51,8 @@ response_loop() ->
     receive
         global_added_succ -> io:format("Got successful add from other node!~n");
         global_added_failed -> io:format("Validation failed during add from other node!~n");
-        error -> io:format("Error from comService!~n")
+        error -> io:format("Error from comService!~n");
+        received_db -> io:format("DB sync complete!~n");
+        view_local_fail -> io:format("View local fail, fetching from other nodes!~n")
     end,
     response_loop().

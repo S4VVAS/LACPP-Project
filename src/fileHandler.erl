@@ -8,13 +8,22 @@ init() ->
 
 loop(Tree, Storage) ->
     receive
-        {init_tree, New_tree} ->
-            loop(New_tree, Storage);
-        {add_local, Data} ->
-            Hash = crypto:hash(sha256, Data),
+        % Deliver tree to other client
+        db_deliver ->
+            comService ! {db_deliver_reply, Tree},
+            loop(Tree, Storage);
+        % Receive tree from other client
+        {db_received, New_tree} ->
+            New_size = bit_size(merkleTree:get_hash(New_tree)),
+            Prev_size = bit_size(merkleTree:get_hash(Tree)),
+            if New_size > Prev_size -> loop(New_tree, Storage);
+            true -> loop(Tree, Storage)
+            end;
+        {add_local, File, Data} ->
+            Hash = crypto:hash(sha256, File), % Encrypt data
             {Root, New_tree} = merkelTree:add(Hash, Tree),
-            comService ! {added_succ, Hash, Root}, % Send the hash and root back to comService to pass on to other nodes
-            loop(New_tree, orddict:store(Hash, Data, Storage)); % Store the newly added data in this node
+            comService ! {added_succ, Hash, Root}, % Send the hash and root back to comService to pass on to other clients
+            loop(New_tree, orddict:store(Hash, Data, Storage)); % Store data in local client
         {add_global, Hash, Received_root} ->
             {Root, New_tree} = merkelTree:add(Hash, Tree),
             % Validation
@@ -29,8 +38,19 @@ loop(Tree, Storage) ->
             ok;
         {remove_global, Data, Hash} ->
             ok;
-        {view, Data} ->
-            ok;
+        {view_local, File} ->
+            Hash = crypto:hash(sha256, File),
+            case orddict:find(Hash, Storage) of
+                {ok, Value} -> comService ! {view_local_succ, Value};
+                error -> comService ! {view_local_fail, Hash}
+            end,
+            loop(Tree, Storage);
+        {view_global, Hash} ->
+            case orddict:find(Hash, Storage) of
+                {ok, Value} -> comService ! {view_global_succ, Value};
+                error -> ok % We don't need to propagate this
+            end,
+            loop(Tree, Storage);
         {count} ->
             ok;
         _ -> loop(Tree, Storage)
