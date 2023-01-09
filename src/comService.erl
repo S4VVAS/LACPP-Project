@@ -54,7 +54,7 @@ receive_db(DB) ->
         {db_received, Tree} ->
             DB ! {db_received, Tree}
     after
-        2000 -> timeout
+        1500 -> timeout
     end.
 
 %
@@ -105,10 +105,10 @@ view_local(Sender, DB, File) ->
                 {view_succ_return, Data} ->
                     Sender ! {view_succ, Data}
             after
-                2000 -> timeout
+                1500 -> timeout
             end
     after
-        2500 -> Sender ! timeout
+        2000 -> Sender ! timeout
     end.
 
 view_global(User, DB, File) ->

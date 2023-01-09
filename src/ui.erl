@@ -43,7 +43,7 @@ view(File) ->
         {view_succ, Data} -> {found, binary_to_list(Data)};
         _  -> timeout_from_db
     after
-        3000 -> timeout_from_comService
+        2500 -> timeout_from_comService
     end.
 
 % A response look to send messages to the user
