@@ -41,6 +41,7 @@ view(File) ->
     comService ! {view_local, self(), list_to_binary(File)},
     receive
         {view_succ, Data} -> {found, binary_to_list(Data)};
+        {no_such_file, _File} -> no_such_file;
         _  -> timeout_from_db
     after
         2500 -> timeout_from_comService

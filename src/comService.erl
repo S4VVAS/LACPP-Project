@@ -27,8 +27,8 @@ loop(DB, UI) ->
             add_local(Sender, DB, File, Data),
             loop(DB, UI);
         % add operation coming from another client
-        {add_global, Hash, Root} ->
-            add_global(DB, UI, Hash, Root),
+        {add_global, File, Hash, Root} ->
+            add_global(DB, UI, File, Hash, Root),
             loop(DB, UI);
         {view_local, Sender, File} ->
             view_local(Sender, DB, File),
@@ -75,16 +75,16 @@ add_local(Sender, DB, File, Data) ->
     receive
         % After added, send reply to local client and tell all other clients
         % about the new hash and root (for validation)
-        {added_succ, Hash, Root} ->
+        {added_succ, File, Hash, Root} ->
             Sender ! {added, Root},
-            [{comService, User} ! {add_global, Hash, Root} || User <- nodes()]
+            [{comService, User} ! {add_global, File, Hash, Root} || User <- nodes()]
     after
         1000 -> Sender ! timeout
     end.
 
 % Add an item from another client
-add_global(DB, UI, Hash, Root) ->
-    DB ! {add_global, Hash, Root},
+add_global(DB, UI, File, Hash, Root) ->
+    DB ! {add_global, File, Hash, Root},
     receive
         {global_added_succ, _Hash, _Root} ->
             UI ! global_added_succ;
@@ -99,6 +99,8 @@ view_local(Sender, DB, File) ->
     receive
         {view_local_succ, Data} ->
             Sender ! {view_succ, Data};
+        {no_such_file, File} ->
+            Sender ! {no_such_file, File};
         {view_local_fail, Hash} ->
             [{comService, User} ! {view_global, node(), Hash} || User <- nodes()],
             receive

@@ -1,0 +1,32 @@
+So things getting a bit messy so I start some docs.
+
+What shits actually doing.
+
+UI:add("filename", "data") -> example UI:add("hw", "hello world")
+1. Converts the "list of characters" to a binary-string (because Erlang prefer those in communication).
+2. Sends filename and data to the comService.
+3. The comService pass it on to the fileHandler
+4. The fileHandler encrypts the data, puts it in the merkle tree with the file name and stores the
+   file in the dictionary with (k,v) -> "filename" -> "data" (both non-hashed)
+5. The fileHandler then redirects the hash and the root and sends them to the comService.
+6. The comService pass this information on to all other nodes, which inserts the hash in its tree
+   and then compares the received root for validation.
+7. Sends confirmation to all nodes that data has been added to the db
+
+UI:view("filename")
+1. Converts the "list of characters" to a binary-string (because Erlang prefer those in communication).
+2. Sends filename to the comService.
+3. The comService pass it on to the fileHandler
+4. The fileHandler looks for the file in the dictionary. If it isn't there it will look for it in
+   the merkel tree, if it is there then ask other nodes for it. If it isn't there it doesn't exist
+   in the db -> UI will get "no_such_file"
+(5). If the file exists in the tree but not locally the comService will ask all other nodes for
+     the file. They will then ask their fileHandler for the file. If the file doesn't exist then
+     do nothing. If it exists, send it back to the node asking for it.
+(6)  Meanwhile the asking node will wait for the file, if it doesn't get received then a timeout
+     will occur and a "timeout_from_comService" will occur.
+
+
+Messages:
+timeout_from_comService -> something wrong happended in the comService.
+timeout_from_db -> the comService has correctly received the message but the db doesnt respond.
