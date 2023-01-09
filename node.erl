@@ -7,6 +7,51 @@
 
 -export([compute_hid/2]).
 
+%% --------------------------------------------------
+%% HIGH LEVEL OVERVIEW
+%% --------------------------------------------------
+
+%% Adding a file, f, from any node of the network, n (root node below):
+%%  - We first determine if the network has enough memory (storage) to hold
+%%  the file. To do so we ping the nodes of the network with a reserve request
+%%  and we want to construct a path of nodes in our network that are able to
+%%  store the file. Therefore, when a node in the network receives a reserve
+%%  request, if the node does not have enough space then it will simply pass on
+%%  the request to its unvisited neighbours. Otherwise, it will add itself to
+%%  the path and pass on the request with itself attached. When it adds itself
+%%  to the path it also will reserve the promised about of memory to. If a node
+%%  has received a request and after adding itself, it deems that we have enough
+%%  memory required. Then it begins a ready respond.
+%%
+%%  - The ready response will simply follow the path that was created back to
+%%  the root node with all the required information for the root node to
+%%  directly contact each node in the path.
+%%
+%%  - We can then load the file into the root node and create the chunks
+%%  of the sizes denoted from the path (when a node adds itself to the path
+%%  it also says how much it can reserved to store). We then also create a
+%%  cumunilative hash of the file for verification and it is stored along side
+%%  the contents in a 'chunk'.
+%%  
+%%  - We then distribute the chunks to the nodes directly from the given contact
+%%  information. And record a timestamp of when this occured for the sake of
+%%  timing out. When a node receives its chunk of the file, it does a prepare
+%%  phase. In the sense that it stores the chunk in a candidate database that
+%%  is seperate from the database (this is to allow an easy rollback). Once
+%%  the node has finished storing the chunk in its candidate database, it
+%%  will respond to the root node that it is prepared.
+%%
+%%  - Once the root node has received a confirmation that all of the storing
+%%  nodes are prepared, it will send a final commmit to each of the nodes
+%%  (the point of no return). Each node that receives the commit request will
+%%  then move the file in the candidate database into the main database. At this
+%%  point, if some node did not receive the commit request, then we will have
+%%  lost some data (we can add some rollback at this stage to if we want).
+%%
+%%  - If a node does not receive a commit request within the specified
+%%  COMMIT_TIMEOUT, then it will remove the chunk from its candidate database.
+
+-define(RESERVE_TIMEOUT, 60). %% Currently in seconds
 -define(PREPARE_TIMEOUT, 10). %% Currently in seconds
 -define(COMMIT_TIMEOUT, 30). %% Currently in seconds
 -define(MAX_CHUNK, 3).
@@ -127,7 +172,7 @@ do_reserve(HId, Visited, RemSize, ChunkSize,
     %% If we have visited for this transaction that we can take it into
     %% account
     AlreadyAllocated = case lists:keytake(HId, 1, Q) of
-                        {_, _, Allocated} ->
+                        {_, _, Allocated, _} ->
                             Allocated;
                         _ ->
                             0
@@ -148,7 +193,8 @@ do_reserve(HId, Visited, RemSize, ChunkSize,
     Q1 = case 0 < ToStore andalso 0 < RemSize of
              true ->
                  FromAlias = hd(Visited),
-                 [{HId, FromAlias, ToStore} | Q];
+                 TS = os:timestamp(),
+                 [{HId, FromAlias, ToStore, TS} | Q];
              false ->
                  Q
          end,
@@ -174,7 +220,8 @@ do_reserve(HId, Visited, RemSize, ChunkSize,
             %% We have allocated enough and can return
             gen_server:cast(MyPid, {ready, HId, [], Visited})
     end,
-    {noreply, State#state{queued = Q1, queued_mem = QMem1}}.
+    State1 = State#state{queued = Q1, queued_mem = QMem1},
+    {noreply, clean(State1)}.
 
 do_ready(HId, RMap, Path,
          #state{alias = MyAlias, id = Id, pid = MyPid, queued = Q,
@@ -185,7 +232,7 @@ do_ready(HId, RMap, Path,
     Rest = tl(Path),
     %% Then we want to find our parent in Q
     PossibleQ = lists:filter(
-                  fun({CurHId, _, _}) -> CurHId == HId end,
+                  fun({CurHId, _, _, _}) -> CurHId == HId end,
                   Q),
     %% Filter out any other paths for this transaction id since
     %% we have found an allocation
@@ -195,28 +242,28 @@ do_ready(HId, RMap, Path,
     State1 = State#state{queued = Q1},
     MyHId = compute_hid(MyAlias, Id),
     case lists:keyfind(FromAlias, 2, PossibleQ) of
-        {_HId, _FromAlias, ToStore} when MyHId == HId ->
+        {_HId, _FromAlias, ToStore, _TS} when MyHId == HId ->
             %% We have an RMap path that is allocated and are at the adding
             %% node again, we can now continue the add phase
             RMap1 = [{MyPid, ToStore} | RMap],
             continue_add(RMap1, State1);
-        {_HId, _FromAlias, ToStore} ->
+        {_HId, _FromAlias, ToStore, _TS} ->
             %% Great, we are on a path that hasn't been returned yet
             %% Then we will recurse
             RMap1 = [{MyPid, ToStore} | RMap],
             {ok, Pid} = dict:find(FromAlias, Neighbours),  %% FIXME
             gen_server:cast(Pid, {ready, HId, RMap1, Rest}),
-            {noreply, State1};
+            {noreply, clean(State1)};
         _ ->
             %% Either we have a faulty call, or this parent has
             %% already received a response from another child
             %% (should only be the second
-            {noreply, State1}
+            {noreply, clean(State1)}
     end.
 
 %% We are currently already adding a file from this node
 start_add(_, _, State) when State#state.add_info /= available ->
-       {reply, not_available, State};
+       {reply, not_available, clean(State)};
 start_add(UIPid, RSize, #state{alias = MyAlias, pid = Pid, id = Id} = State) ->
     %% We first want to reserve nodes of our network for the transaction to
     %% take place
@@ -225,7 +272,8 @@ start_add(UIPid, RSize, #state{alias = MyAlias, pid = Pid, id = Id} = State) ->
 
     %% When the reserve phases finishes it will automatically invoke continue_add
     %% so we can just let our calling node that we have started to reserve things
-    {reply, started_reserving, State#state{add_info = UIPid}}.
+    State1 = State#state{add_info = UIPid},
+    {reply, started_reserving, clean(State1)}.
 
 continue_add(RMap, #state{pid = MyPid, add_info = UIPid} = State) ->
     %% We now want to retreive the file that is to be stored from the front-end
@@ -250,13 +298,14 @@ continue_add(RMap, #state{pid = MyPid, add_info = UIPid} = State) ->
     %% Keep track of our current timestamp for the sake of timingout
     CurTS = os:timestamp(),
     State1 = State#state{add_info = {UIPid, FileName, CurTS, Pids}},
-    {noreply, State1}.
+    {noreply, clean(State1)}.
 
 end_add(UIPid, Status, State) ->
     %% We have either timed out or successfully added the file to our network.
     %% Either way we will send a confirmation to the front-end
     ui:confirmation(UIPid, Status),
-    {noreply, State#state{add_info = available}}.
+    State1 = State#state{add_info = available},
+    {noreply, clean(State1)}.
 
 do_prepare(From, FileName, #chunk{} = Chunk,
            #state{pid = MyPid, candidate = C} = State) ->
@@ -267,7 +316,8 @@ do_prepare(From, FileName, #chunk{} = Chunk,
     C1 = [{FileName, Chunk, CurTS} | C],
     %% We then notify the distributing node that we are prepared
     gen_server:cast(From, {notify, MyPid}),
-    {noreply, State#state{candidate = C1}}.
+    State1 = State#state{candidate = C1},
+    {noreply, clean(State1)}.
 
 do_notify(From, #state{add_info = {UIPid, FileName, TS, Pids}} = State) ->
     %% We are in the process of waiting for all nodes that we have
@@ -302,14 +352,15 @@ do_notify(From, #state{add_info = {UIPid, FileName, TS, Pids}} = State) ->
             %% Otherwise, we timedout and can send the front-end this info
             end_add(UIPid, fail, State);
         {true, false} ->
+            State1 = State#state{add_info = {UIPid, FileName, TS, Pids1}},
             %% We are still waiting for another process to reply and have time
-            {noreply, State#state{add_info = {UIPid, FileName, TS, Pids1}}}
+            {noreply, clean(State1)}
     end;
 do_notify(_, State) ->
     %% In this case, we have timedout and so we can ignore the request since
     %% it took to long for the node to respond
     %% FIXME: maybe add a warning?
-    {noreply, State}.
+    {noreply, clean(State)}.
 
 do_commit(FileName, #state{data = Data, candidate = C} = State) ->
     %% We get the go ahead to commit the change to our main database for
@@ -324,15 +375,34 @@ do_commit(FileName, #state{data = Data, candidate = C} = State) ->
             QMem1 = State#state.queued_mem + Amt,
             %% Increment our ID so the next transaction has a different hash
             Id1 = State#state.id + 1,
-            {noreply, State#state{data = Data1, candidate = C1,
-                                  memory = Mem1, queued_mem = QMem1,
-                                  id = Id1}};
+            State1 = #state{data = Data1, candidate = C1,
+                            memory = Mem1, queued_mem = QMem1,
+                            id = Id1},
+            {noreply, clean(State1)};
         _ ->
-            {noreply, State}
+            %% FIXME: This is bad, we timed out locally but not globally
+            %% (shouldn't happen if the TIMEOUT are correctly proportioned
+            {noreply, clean(State)}
     end.
 
-%% clean(State) ->
-%%     State.
+clean(#state{candidate = C, queued = Q, queued_mem = M} = State) ->
+    %% Removed the timedout out commits in our candidate database
+    C1 = lists:filter(fun({_, _, TS}) ->
+                              timedout(TS, ?COMMIT_TIMEOUT)
+                      end, C),
+
+    %% Remove the timedout out reserve request
+    {Q1, Rmvd} = lists:partition(fun({_, _, _, TS}) ->
+                                         timedout(TS, ?RESERVE_TIMEOUT)
+                                 end, Q),
+    %% Add the memory back to our available memory
+    {M1, _} = lists:foldl(fun({HId, _, Reserved, _}, {AccM, HIds}) ->
+                                  case lists:member(HId , HIds) of
+                                      true -> {AccM, HIds};
+                                      false -> {AccM + Reserved, [HId | HIds]}
+                                  end
+                          end, {M, []}, Rmvd),
+    State#state{candidate = C1, queued = Q1, queued_mem = M1}.
 
 %% MISC HELPERS SHOULD BE MOVED TO SEPERATE MODULE?
 compute_hid(Alias, Id) when is_atom(Alias) andalso is_integer(Id) ->
@@ -344,4 +414,4 @@ hash(Bin) ->
 
 timedout({_, OldSecs, _}, Timeout) ->
     {_, CurSecs, _} = os:timestamp(),
-    abs(CurSecs - OldSecs) > Timeout.
+    Timeout < abs(CurSecs - OldSecs).
