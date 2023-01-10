@@ -5,8 +5,6 @@
 %% gen_server behaviour exports
 -export([start/1, init/1, handle_call/3, handle_cast/2]).
 
--export([compute_hid/2]).
-
 %% --------------------------------------------------
 %% HIGH LEVEL OVERVIEW
 %% --------------------------------------------------
@@ -51,7 +49,7 @@
 %%  - If a node does not receive a commit request within the specified
 %%  COMMIT_TIMEOUT, then it will remove the chunk from its candidate database.
 
--define(RESERVE_TIMEOUT, 60). %% Currently in seconds
+-define(RESERVE_TIMEOUT, 1). %% Currently in seconds
 -define(PREPARE_TIMEOUT, 10). %% Currently in seconds
 -define(COMMIT_TIMEOUT, 30). %% Currently in seconds
 -define(MAX_CHUNK, 3).
@@ -64,7 +62,7 @@
         , neighbours    = dict:new()
         , memory        = ?DEFAULT_MEMORY
         , data          = dict:new()
-        , candidate     = []
+        , candidate     = {0, []}
         , queued        = []
         , id            = 0
         , queued_mem    = 0
@@ -73,9 +71,11 @@
        ).
 
 -record(chunk,
-        { position = 0
-        , contents = <<>>
-        , hash = <<>>
+        { position  = 0
+        , contents  = <<>>
+        , hash      = <<>>
+        , size      = 0
+        , eof       = false 
         }
        ).
 
@@ -100,10 +100,16 @@ init({Alias}) ->
 %% CALL DEFINITION AND BINDINGS
 handle_call({register, Alias, Pid}, _From, State) ->
     do_register(Alias, Pid, State);
-handle_call(print, _From, State) ->
-    {reply, {ok, dict:fetch_keys(State#state.data)}, State};
+handle_call(print, _From, State0) -> %% USED JUST FOR DEBUGGING PURPOSES
+    State = clean(State0),
+    {reply, {ok, dict:fetch_keys(State#state.neighbours),
+             dict:fetch_keys(State#state.data),
+             State#state.memory, State#state.queued, State#state.queued_mem
+            }, State};
 handle_call({add, RequiredSize}, {UIPid, _}, State) ->
     start_add(UIPid, RequiredSize, State);
+handle_call({view, FileName}, {UIPid, _}, State) ->
+    start_view(UIPid, FileName, State);
 handle_call(_Req, _From, #state{} = State) ->
     {reply, ok, State}.
 
@@ -126,6 +132,8 @@ handle_cast({notify, From}, State) ->
     do_notify(From, State);
 handle_cast({commit, FileName}, State) ->
     do_commit(FileName, State);
+handle_cast({view, UIPid, FileName, Visited}, State) ->
+    do_view(UIPid, FileName, Visited, State);
 handle_cast(_Req, #state{} = State) ->
     {noreply, State}.
 
@@ -167,24 +175,29 @@ do_connect(Depth, ToPid, #state{alias = Alias, pid = Pid} = State) ->
 
 do_reserve(HId, Visited, RemSize, ChunkSize,
            #state{alias = MyAlias, pid = MyPid, queued = Q,
-                  queued_mem = QMem, memory = Mem} = State) ->
+                  queued_mem = QMem, memory = Mem,
+                  candidate = {CSize, _C}} = State) ->
 
-    %% If we have visited for this transaction that we can take it into
-    %% account
-    AlreadyAllocated = case lists:keytake(HId, 1, Q) of
-                        {_, _, Allocated, _} ->
-                            Allocated;
-                        _ ->
-                            0
-                       end,
+    %% If we have visited to reserve for this transaction then we can take into
+    %% account that it is allocated
+    AlreadyAllocated = lists:foldl(
+                         fun({CurHId, _, Allocated, _}, Max) ->
+                                 case CurHId == HId
+                                      andalso Max < Allocated
+                                 of
+                                     true -> Allocated;
+                                     false -> Max
+                                 end
+                         end,
+                         0, Q),
     %% Then we can compute what we are able to store
-    Available = Mem - QMem + AlreadyAllocated,
+    Available = Mem - CSize - QMem + AlreadyAllocated,
     NeededToStore = min(RemSize, min(ChunkSize, Available)),
-    ToStore = case NeededToStore < Available of
+    ToStore = case NeededToStore =< Available of
                   true -> NeededToStore;
                   false -> 0
               end,
-    QMem1 =  QMem - ToStore + AlreadyAllocated,
+    QMem1 =  QMem - AlreadyAllocated + max(AlreadyAllocated, ToStore),
     RemSize1 = RemSize - ToStore,
 
     %% If we have enough room to store it then we can add it to our queue
@@ -225,7 +238,7 @@ do_reserve(HId, Visited, RemSize, ChunkSize,
 
 do_ready(HId, RMap, Path,
          #state{alias = MyAlias, id = Id, pid = MyPid, queued = Q,
-                neighbours = Neighbours} = State) ->
+                queued_mem = QMem, neighbours = Neighbours} = State) ->
 
     %% We take a step on our path
     FromAlias = hd(Path),
@@ -236,11 +249,18 @@ do_ready(HId, RMap, Path,
                   Q),
     %% Filter out any other paths for this transaction id since
     %% we have found an allocation
-    Q1 = lists:filter(
-           fun({CurHId, _, _}) -> CurHId /= HId end,
-           Q), 
-    State1 = State#state{queued = Q1},
-    MyHId = compute_hid(MyAlias, Id),
+    {Q1, Rmvd} = lists:partition(
+           fun({CurHId, _, _, _}) -> CurHId /= HId end,
+           Q),
+    Allocated =lists:foldl(
+                     fun({_, _, Reserved, _}, Max) -> max(Reserved, Max) end,
+                     0, Rmvd),
+ 
+    %% Return the allocated amount to our available memory
+    QMem1 = QMem - Allocated,
+
+    State1 = State#state{queued = Q1, queued_mem = QMem1},
+    MyHId = misc:compute_hid(MyAlias, Id),
     case lists:keyfind(FromAlias, 2, PossibleQ) of
         {_HId, _FromAlias, ToStore, _TS} when MyHId == HId ->
             %% We have an RMap path that is allocated and are at the adding
@@ -267,28 +287,32 @@ start_add(_, _, State) when State#state.add_info /= available ->
 start_add(UIPid, RSize, #state{alias = MyAlias, pid = Pid, id = Id} = State) ->
     %% We first want to reserve nodes of our network for the transaction to
     %% take place
-    HId = compute_hid(MyAlias, Id),
+    HId = misc:compute_hid(MyAlias, Id),
     gen_server:cast(Pid, {reserve, {HId, [MyAlias]}, RSize, ?MAX_CHUNK}),
 
     %% When the reserve phases finishes it will automatically invoke continue_add
     %% so we can just let our calling node that we have started to reserve things
     State1 = State#state{add_info = UIPid},
-    {reply, started_reserving, clean(State1)}.
+    {reply, started_adding, clean(State1)}.
 
 continue_add(RMap, #state{pid = MyPid, add_info = UIPid} = State) ->
     %% We now want to retreive the file that is to be stored from the front-end
     {ok, FileName, AllContents} = ui:request_file(UIPid),
 
+    Length = length(RMap),
+
     %% Then we define our function to split the file into chunks to be stored
     %% and send those chunks out to the respective nodes (directly)
     Fun = fun({Pid, ToStore}, {Posn, Contents, Hash}) ->
             <<Cur:ToStore/binary, Rest/binary>> = Contents,
-            Hash1 = hash(<<Hash/binary, Cur/binary>>),
-            Chunk = #chunk{position = Posn, contents = Cur, hash = Hash1},
+            Hash1 = misc:hash(<<Hash/binary, Cur/binary>>),
+            Chunk = #chunk{position = Posn, contents = Cur,
+                           hash = Hash1, size = size(Cur),
+                           eof = Posn == Length},
             gen_server:cast(Pid, {prepare, MyPid, FileName, Chunk}),
             {Posn + 1, Rest, Hash1}
           end,
-    {_, <<>>, _} = lists:foldl(Fun, {0, AllContents, hash(<<>>)}, RMap),
+    {_, <<>>, _} = lists:foldl(Fun, {1, AllContents, misc:hash(<<>>)}, RMap),
 
     %% We keep track of the nodes that we have sent a chunk to and we
     %% will now have to wait until all those nodes respond that they
@@ -303,20 +327,21 @@ continue_add(RMap, #state{pid = MyPid, add_info = UIPid} = State) ->
 end_add(UIPid, Status, State) ->
     %% We have either timed out or successfully added the file to our network.
     %% Either way we will send a confirmation to the front-end
-    ui:confirmation(UIPid, Status),
+    ui:notify(UIPid, {added, Status}),
     State1 = State#state{add_info = available},
     {noreply, clean(State1)}.
 
 do_prepare(From, FileName, #chunk{} = Chunk,
-           #state{pid = MyPid, candidate = C} = State) ->
+           #state{pid = MyPid, candidate = {CSize, C}} = State) ->
     %% We will keep track of our time for the sake of a potential timeout
     CurTS = os:timestamp(),
     %% We will add the chunk to our candidate database so it is easy to
     %% rollback if we timeout
     C1 = [{FileName, Chunk, CurTS} | C],
+    CSize1 = CSize + Chunk#chunk.size,
     %% We then notify the distributing node that we are prepared
     gen_server:cast(From, {notify, MyPid}),
-    State1 = State#state{candidate = C1},
+    State1 = State#state{candidate = {CSize1, C1}},
     {noreply, clean(State1)}.
 
 do_notify(From, #state{add_info = {UIPid, FileName, TS, Pids}} = State) ->
@@ -334,7 +359,7 @@ do_notify(From, #state{add_info = {UIPid, FileName, TS, Pids}} = State) ->
    
     %% We then check if this add has timedout yet, and if not then we check
     %% if we have all nodes responding they have prepared
-    case {not timedout(TS, ?PREPARE_TIMEOUT),
+    case {not misc:timedout(TS, ?PREPARE_TIMEOUT),
           lists:foldl(fun({_Pid, Prepared}, AllPrepared) ->
                               AllPrepared andalso Prepared
                       end,
@@ -362,22 +387,21 @@ do_notify(_, State) ->
     %% FIXME: maybe add a warning?
     {noreply, clean(State)}.
 
-do_commit(FileName, #state{data = Data, candidate = C} = State) ->
+do_commit(FileName, #state{data = Data, candidate = {CSize, C}} = State) ->
     %% We get the go ahead to commit the change to our main database for
     %% candidate
     case lists:keytake(FileName, 1, C) of
         {value, {_FN, Chunk, _}, C1} ->
+            CSize1 = CSize - Chunk#chunk.size,
             %% Add the data to main database
             Data1 = dict:store(FileName, Chunk, Data),
             %% Update our remaining and queued memory accordingly
             Amt = size(Chunk#chunk.contents),
             Mem1 = State#state.memory - Amt,
-            QMem1 = State#state.queued_mem + Amt,
             %% Increment our ID so the next transaction has a different hash
             Id1 = State#state.id + 1,
-            State1 = #state{data = Data1, candidate = C1,
-                            memory = Mem1, queued_mem = QMem1,
-                            id = Id1},
+            State1 = State#state{data = Data1, candidate = {CSize1, C1},
+                            memory = Mem1, id = Id1},
             {noreply, clean(State1)};
         _ ->
             %% FIXME: This is bad, we timed out locally but not globally
@@ -385,33 +409,51 @@ do_commit(FileName, #state{data = Data, candidate = C} = State) ->
             {noreply, clean(State)}
     end.
 
-clean(#state{candidate = C, queued = Q, queued_mem = M} = State) ->
+start_view(UIPid, FileName, #state{pid = Pid} = State) ->
+    gen_server:cast(Pid, {view, UIPid, FileName, []}),
+    {reply, collecting_file, State}.
+
+do_view(UIPid, FileName, Visited, #state{neighbours = Neighbours,
+                                         data = Data} = State) ->
+    case dict:find(FileName, Data) of
+        error -> skip;
+        {ok, Chunk} ->
+            ui:give_chunk(UIPid, FileName, Chunk)
+    end,
+    Visited1 = dict:fetch_keys(Neighbours) ++ Visited,
+    dict:map(fun(Alias, Pid) ->
+                case lists:member(Alias, Visited) of
+                    true -> skip;
+                    false ->
+                        gen_server:cast(Pid, {view, UIPid, FileName, Visited1})
+                end
+             end, Neighbours),
+    {noreply, State}.
+
+%% CLEAN FUNCTION TO CLEAN UP TIMEDOUT REQUESTS
+clean(#state{candidate = {_CSize, C}, queued = Q, queued_mem = QMem} = State) ->
     %% Removed the timedout out commits in our candidate database
     C1 = lists:filter(fun({_, _, TS}) ->
-                              timedout(TS, ?COMMIT_TIMEOUT)
+                              not misc:timedout(TS, ?COMMIT_TIMEOUT)
                       end, C),
+    CSize1 = lists:foldl(fun({_, Chunk, _}, Acc) ->
+                                 Acc + Chunk#chunk.size
+                         end, 0, C1),
 
     %% Remove the timedout out reserve request
     {Q1, Rmvd} = lists:partition(fun({_, _, _, TS}) ->
-                                         timedout(TS, ?RESERVE_TIMEOUT)
+                                         not misc:timedout(TS, ?RESERVE_TIMEOUT)
                                  end, Q),
     %% Add the memory back to our available memory
-    {M1, _} = lists:foldl(fun({HId, _, Reserved, _}, {AccM, HIds}) ->
-                                  case lists:member(HId , HIds) of
-                                      true -> {AccM, HIds};
-                                      false -> {AccM + Reserved, [HId | HIds]}
-                                  end
-                          end, {M, []}, Rmvd),
-    State#state{candidate = C1, queued = Q1, queued_mem = M1}.
-
-%% MISC HELPERS SHOULD BE MOVED TO SEPERATE MODULE?
-compute_hid(Alias, Id) when is_atom(Alias) andalso is_integer(Id) ->
-    Bin = atom_to_binary(Alias),
-    hash(<<Bin/binary, Id>>).
-
-hash(Bin) ->
-    crypto:hash(sha256, Bin).
-
-timedout({_, OldSecs, _}, Timeout) ->
-    {_, CurSecs, _} = os:timestamp(),
-    Timeout < abs(CurSecs - OldSecs).
+    UniqueRmvd = lists:foldl(fun({HId, _, Removed, _}, Acc) ->
+                                     case lists:keytake(HId, 1, Acc) of
+                                         false ->
+                                             [{HId, Removed} | Acc];
+                                         {value, {_HId, MaxRmved}, Acc1} ->
+                                             [{HId, max(Removed, MaxRmved)} | Acc1]
+                                     end
+                             end, [], Rmvd),
+    QMem1 = lists:foldl(fun({_HId, Reserved}, AccQMem) ->
+                                AccQMem - Reserved
+                          end, QMem, UniqueRmvd),
+    State#state{candidate = {CSize1, C1}, queued = Q1, queued_mem = QMem1}.
