@@ -285,7 +285,7 @@ do_ready(HId, RMap, Path,
         _ ->
             %% Either we have a faulty call, or this parent has
             %% already received a response from another child
-            %% (should only be the second
+            %% (should only be the second)
             {noreply, clean(State1)}
     end.
 
@@ -324,17 +324,21 @@ continue_add(RMap, #state{pid = MyPid, add_info = {UIPid, _TS}} = State) ->
             gen_server:cast(Pid, {prepare, MyPid, FileName, Chunk}),
             {Posn + 1, Rest, Hash1}
           end,
-    {_, <<>>, _} = lists:foldl(Fun, {1, AllContents, misc:hash(<<>>)}, RMap),
-
-    %% We keep track of the nodes that we have sent a chunk to and we
-    %% will now have to wait until all those nodes respond that they
-    %% are prepared to commit, or we timedout on the request and rollback
-    Pids = lists:foldl(fun({Pid, _}, Pids) -> [{Pid, false} | Pids] end,
-                      [], RMap),
-    %% Keep track of our current timestamp for the sake of timingout
-    CurTS = os:timestamp(),
-    State1 = State#state{add_info = {UIPid, FileName, CurTS, Pids}},
-    {noreply, clean(State1)}.
+    case lists:foldl(Fun, {1, AllContents, misc:hash(<<>>)}, RMap) of
+        {_, <<>>, _} ->
+            %% We keep track of the nodes that we have sent a chunk to and we
+            %% will now have to wait until all those nodes respond that they
+            %% are prepared to commit, or we timedout on the request and rollback
+            Pids = lists:foldl(fun({Pid, _}, Pids) -> [{Pid, false} | Pids] end,
+                              [], RMap),
+            %% Keep track of our current timestamp for the sake of timingout
+            CurTS = os:timestamp(),
+            State1 = State#state{add_info = {UIPid, FileName, CurTS, Pids}},
+            {noreply, clean(State1)};
+        {_, _NotAllocated, _} ->
+            %% A node was not able to hold its promise of size
+            end_add(UIPid, FileName, unable_to_reserve, State)
+    end.
 
 end_add(UIPid, FileName, Status, State) ->
     %% We have either timed out or successfully added the file to our network.

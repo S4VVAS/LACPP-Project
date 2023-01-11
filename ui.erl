@@ -48,11 +48,20 @@ start({connect, EndPoint}) ->
 add(UIPid, FileName, Contents) ->
     case gen_server:call(UIPid, {add, FileName, Contents}) of
         started_adding ->
-            receive {status, FileName, Status} ->
-                        {FileName, Status};
-                    Error ->
-                        Error
+            receive
+                {status, FileName, ok} ->
+                    case view(UIPid, FileName) of
+                        {ok, File} ->
+                            {ok, File};
+                        Error ->
+                            %% FIXME we need to add a call to rollback the
+                            %% add of filename
+                            {corrupted, FileName, Error}
+                    end;
+                {status, FileName, Error} ->
+                    {fail, FileName, Error}
             after ?ADD_TIMEOUT ->
+                      gen_server:cast(UIPid, {timeout, add}),
                       timedout
             end;
         Response ->
@@ -65,10 +74,11 @@ view(UIPid, FileName) ->
         collecting_file ->
             receive
                 {file, File} ->
-                    File;
+                    {ok, File};
                 Error ->
                     Error
             after ?VIEW_TIMEOUT ->
+                    gen_server:cast(UIPid, {timeout, view}),
                     timedout
             end;
         Response ->
@@ -140,6 +150,13 @@ handle_cast({give, FileName, Chunk}, #state{view_info = View} = State)
                     %% Otherwise, we will try to verify and return
                     do_give(FileName, [Chunk | Chunks], From, State)
             end
+    end;
+handle_cast({timeout, Type}, State) ->
+    case Type of
+        add ->
+            {noreply, State#state{add_info = unallocated}};
+        view ->
+            {noreply, State#state{view_info = unallocated}}
     end;
 handle_cast(_Req, State) ->
     {noreply, State}.
