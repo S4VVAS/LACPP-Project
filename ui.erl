@@ -5,13 +5,13 @@
 %% gen_server behaviour exports
 -export([init/1, handle_call/3, handle_cast/2]).
 
--export([start/0, start/1, add/2, view/1]).
+-export([start/0, start/1, add/3, view/2]).
 
 -export([add_status/3, request_file/1, give_chunk/3]).
 
 -define(DEFAULT_DEPTH, 3).
--define(VIEW_TIMEOUT, 1000). % In milliseconds
--define(ADD_TIMEOUT, 1000). % In milliseconds
+-define(VIEW_TIMEOUT, 100). % In milliseconds
+-define(ADD_TIMEOUT, 100). % In milliseconds
 
 %% record definitions
 -record(state,
@@ -38,22 +38,10 @@
 
 %% FOR THE USER TO USE
 start() ->
-    Response = gen_server:start(?MODULE, [undefined], []),
-    case Response of
-        {ok, UIPid} ->
-            register(pui, UIPid),
-            up_and_running;
-        _ -> failed_to_start
-    end.
+    gen_server:start(?MODULE, [undefined], []).
 
 start(EndPoint) ->
-    Response = gen_server:start(?MODULE, [EndPoint], []),
-    case Response of
-        {ok, UIPid} ->
-            register(pui, UIPid),
-            up_and_running;
-        _ -> failed_to_start
-    end.
+    gen_server:start(?MODULE, [EndPoint], []).
 
 init([undefined]) ->
     {ok, Node} = node:start({create}),
@@ -63,16 +51,22 @@ init([EndPoint]) ->
     {ok, #state{node = Node}}.
 
 
-add(FileName, Contents) ->
+add(UIPid, FileName, Contents) ->
     BinFileName = list_to_binary(FileName),
     BinContents = list_to_binary(Contents),
-    case gen_server:call(pui, {add, BinFileName, BinContents}) of
+    case gen_server:call(UIPid, {add, BinFileName, BinContents}) of
         started_adding ->
             receive
                 {status, FileName, ok} ->
                     case view(UIPid, FileName) of
                         {ok, File} ->
                             {ok, File};
+                        {corrupted_chunks, X} when size(BinContents) < X ->
+                            %% We have a namespace collision. So we will
+                            %% delete and then retry.
+                            %% FIXME we need to add a call to rollback the
+                            %% add of filename
+                            add(UIPid, FileName, Contents);
                         Error ->
                             %% FIXME we need to add a call to rollback the
                             %% add of filename
@@ -89,9 +83,9 @@ add(FileName, Contents) ->
     end.
 
 
-view(FileName) ->
+view(UIPid, FileName) ->
     BinFileName = list_to_binary(FileName),
-    case gen_server:call(pui, {view, BinFileName}) of
+    case gen_server:call(UIPid, {view, BinFileName}) of
         collecting_file ->
             receive
                 {file, File} ->
@@ -99,8 +93,7 @@ view(FileName) ->
                 Error ->
                     Error
             after ?VIEW_TIMEOUT ->
-                    gen_server:cast(UIPid, {timeout, view}),
-                    timedout
+                      gen_server:call(UIPid, {timeout, view})
             end;
         Response ->
             Response
@@ -135,6 +128,22 @@ handle_call(contents, _From, State) ->
     {_, File} = State#state.add_info,
     #file{name = FileName, contents = Contents} = File,
     {reply, {ok, FileName, Contents}, State};
+
+handle_call({timeout, Type}, _From, State) ->
+    case Type of
+        add ->
+            {noreply, State#state{add_info = unallocated}};
+        view ->
+            case State#state.view_info of
+                unallocated ->
+                    {reply, timedout, State};
+                {_FileName, Chunks, _} ->
+                    case length(Chunks) of
+                        0 -> does_not_exist;
+                        X -> {corrupted_chunks, X}
+                    end
+            end
+    end;
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -161,13 +170,6 @@ handle_cast({give, FileName, Chunk}, #state{view_info = View} = State)
                     %% Otherwise, we will try to verify and return
                     do_give(FileName, [Chunk | Chunks], From, State)
             end
-    end;
-handle_cast({timeout, Type}, State) ->
-    case Type of
-        add ->
-            {noreply, State#state{add_info = unallocated}};
-        view ->
-            {noreply, State#state{view_info = unallocated}}
     end;
 handle_cast(_Req, State) ->
     {noreply, State}.
