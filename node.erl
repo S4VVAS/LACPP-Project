@@ -48,10 +48,22 @@
 %%
 %%  - If a node does not receive a commit request within the specified
 %%  COMMIT_TIMEOUT, then it will remove the chunk from its candidate database.
+%%
+%%
+%%
+%%  Viewing a file, f, from any of the network, n (root node below) with a ui:
+%%  - We first do a breadth first search of our entire connected network.
+%%  - Each node that we visit that has a file associated with the FileName we
+%%  are looking for will directly ping the ui with their chunk
+%%  - Whenever the viewing ui receives a chunk, it will try to verify that
+%%  the chunks it has accumlated are valid. If they are valid then we return,
+%%  otherwise, we will continue waiting.
+%%  - After the specified timeout period, the viewing node will return with
+%%  a timeout code.
 
 -define(RESERVE_TIMEOUT, 1). %% Currently in seconds
--define(PREPARE_TIMEOUT, 10). %% Currently in seconds
--define(COMMIT_TIMEOUT, 30). %% Currently in seconds
+-define(PREPARE_TIMEOUT, 2). %% Currently in seconds
+-define(COMMIT_TIMEOUT, 5). %% Currently in seconds
 -define(MAX_CHUNK, 3).
 -define(DEFAULT_MEMORY, 4).
 
@@ -292,10 +304,14 @@ start_add(UIPid, RSize, #state{alias = MyAlias, pid = Pid, id = Id} = State) ->
 
     %% When the reserve phases finishes it will automatically invoke continue_add
     %% so we can just let our calling node that we have started to reserve things
-    State1 = State#state{add_info = UIPid},
+    
+    %% Keep track of our current timestamp for the sake of timingout from
+    %% reserve
+    TS = os:timestamp(),
+    State1 = State#state{add_info = {UIPid, TS}},
     {reply, started_adding, clean(State1)}.
 
-continue_add(RMap, #state{pid = MyPid, add_info = UIPid} = State) ->
+continue_add(RMap, #state{pid = MyPid, add_info = {UIPid, _TS}} = State) ->
     %% We now want to retreive the file that is to be stored from the front-end
     {ok, FileName, AllContents} = ui:request_file(UIPid),
 
@@ -324,10 +340,10 @@ continue_add(RMap, #state{pid = MyPid, add_info = UIPid} = State) ->
     State1 = State#state{add_info = {UIPid, FileName, CurTS, Pids}},
     {noreply, clean(State1)}.
 
-end_add(UIPid, Status, State) ->
+end_add(UIPid, FileName, Status, State) ->
     %% We have either timed out or successfully added the file to our network.
     %% Either way we will send a confirmation to the front-end
-    ui:notify(UIPid, {added, Status}),
+    ui:add_status(UIPid, FileName, Status),
     State1 = State#state{add_info = available},
     {noreply, clean(State1)}.
 
@@ -372,10 +388,10 @@ do_notify(From, #state{add_info = {UIPid, FileName, TS, Pids}} = State) ->
             lists:foreach(fun({Pid, _}) ->
                             gen_server:cast(Pid, {commit, FileName})
                           end, Pids),
-            end_add(UIPid, ok, State);
+            end_add(UIPid, FileName, ok, State);
         {false, _} ->
             %% Otherwise, we timedout and can send the front-end this info
-            end_add(UIPid, fail, State);
+            end_add(UIPid, FileName, fail, State);
         {true, false} ->
             State1 = State#state{add_info = {UIPid, FileName, TS, Pids1}},
             %% We are still waiting for another process to reply and have time
@@ -410,16 +426,20 @@ do_commit(FileName, #state{data = Data, candidate = {CSize, C}} = State) ->
     end.
 
 start_view(UIPid, FileName, #state{pid = Pid} = State) ->
+    %% We begin our depth first search
     gen_server:cast(Pid, {view, UIPid, FileName, []}),
     {reply, collecting_file, State}.
 
 do_view(UIPid, FileName, Visited, #state{neighbours = Neighbours,
                                          data = Data} = State) ->
+    %%% If we have a chunk then we ping the ui
     case dict:find(FileName, Data) of
         error -> skip;
         {ok, Chunk} ->
             ui:give_chunk(UIPid, FileName, Chunk)
     end,
+
+    %% Then, we recursively invoke on our unvisited neighbours
     Visited1 = dict:fetch_keys(Neighbours) ++ Visited,
     dict:map(fun(Alias, Pid) ->
                 case lists:member(Alias, Visited) of
@@ -431,11 +451,23 @@ do_view(UIPid, FileName, Visited, #state{neighbours = Neighbours,
     {noreply, State}.
 
 %% CLEAN FUNCTION TO CLEAN UP TIMEDOUT REQUESTS
-clean(#state{candidate = {_CSize, C}, queued = Q, queued_mem = QMem} = State) ->
+clean(#state{add_info = {UIPid, TS}} = State) ->
+    case misc:timedout(TS, ?RESERVE_TIMEOUT) of
+        true ->
+            {noreply, State1} = end_add(UIPid, no_memory, fail, State),
+            State1;
+        false -> do_clean(State)
+    end;
+clean(State) ->
+    do_clean(State).
+        
+do_clean(#state{candidate = {_CSize, C},
+                queued = Q, queued_mem = QMem} = State) ->
     %% Removed the timedout out commits in our candidate database
     C1 = lists:filter(fun({_, _, TS}) ->
                               not misc:timedout(TS, ?COMMIT_TIMEOUT)
                       end, C),
+    %% Update the size accordingly
     CSize1 = lists:foldl(fun({_, Chunk, _}, Acc) ->
                                  Acc + Chunk#chunk.size
                          end, 0, C1),

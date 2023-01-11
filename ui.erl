@@ -7,16 +7,17 @@
 
 -export([start/1, start/2, add/3, view/2]).
 
--export([notify/2, request_file/1, get_endpoint/1, give_chunk/3]).
+-export([add_status/3, request_file/1, get_endpoint/1, give_chunk/3]).
 
 -define(DEFAULT_DEPTH, 3).
 -define(VIEW_TIMEOUT, 1000). % In milliseconds
+-define(ADD_TIMEOUT, 1000). % In milliseconds
 
 %% record definitions
 -record(state,
-        { file      = unallocated
+        { add_info  = unallocated
         , node      = undefined
-        , view      = unallocated
+        , view_info = unallocated
         }
        ).
 
@@ -39,21 +40,40 @@
 start(Alias) ->
     gen_server:start(?MODULE, [Alias, undefined], []).
 
+start(Alias, {ui, UIPid}) ->
+    {ok, UINode} = ui:get_endpoint(UIPid),
+    start(Alias, UINode);
 start(Alias, EndPoint) ->
     gen_server:start(?MODULE, [Alias, EndPoint], []).
 
 add(UIPid, FileName, Contents) ->
-    gen_server:call(UIPid, {add, FileName, Contents}).
+    case gen_server:call(UIPid, {add, FileName, Contents}) of
+        started_adding ->
+            receive {status, FileName, Status} ->
+                        {FileName, Status};
+                    Error ->
+                        Error
+            after ?ADD_TIMEOUT ->
+                      timedout
+            end;
+        Response ->
+            Response
+    end.
+
 
 view(UIPid, FileName) ->
-    collecting_file = gen_server:call(UIPid, {view, FileName}),
-    receive
-        {file, File} ->
-            File;
-        Error ->
-            Error
-    after ?VIEW_TIMEOUT ->
-          timedout
+    case gen_server:call(UIPid, {view, FileName}) of
+        collecting_file ->
+            receive
+                {file, File} ->
+                    File;
+                Error ->
+                    Error
+            after ?VIEW_TIMEOUT ->
+                    timedout
+            end;
+        Response ->
+            Response
     end.
 
 get_endpoint(UIPid) ->
@@ -63,8 +83,8 @@ get_endpoint(UIPid) ->
 request_file(UIPid) ->
     gen_server:call(UIPid, contents).
 
-notify(UIPid, Notif) ->
-    gen_server:cast(UIPid, {notify, Notif}).
+add_status(UIPid, FileName, Status) ->
+    gen_server:cast(UIPid, {add_status, FileName, Status}).
 
 give_chunk(UIPid, FileName, Chunk) ->
     gen_server:cast(UIPid, {give, FileName, Chunk}).
@@ -80,43 +100,54 @@ init([Alias, EndPoint]) ->
 handle_call(node, _From, #state{node = Node} = State) ->
     {reply, {ok, Node}, State};
 
-handle_call({add, FileName, Contents}, _From,
-            #state{file = unallocated, node = Node} = State) ->
+handle_call({add, FileName, Contents}, {From, _},
+            #state{node = Node} = State) ->
     File = #file{name = FileName, contents = Contents},
     Response = gen_server:call(Node, {add, size(Contents)}),
-    {reply, Response, State#state{file = File}};
-handle_call({add, _, _}, _From, State) ->
-    {reply, already_adding, State};
+    {reply, Response, State#state{add_info = {From, File}}};
 
-handle_call({view, FileName}, {From, _},
-            #state{node = Node, view = unallocated} = State) ->
+handle_call({view, FileName}, {From, _}, #state{node = Node} = State) ->
     View = {FileName, [], From},
     Response = gen_server:call(Node, {view, FileName}),
-    {reply, Response, State#state{view = View}};
-handle_call({view, _}, _From, State) ->
-    {reply, already_viewing, State};
+    {reply, Response, State#state{view_info = View}};
 
 handle_call(contents, _From, State) ->
-    #file{name = FileName, contents = Contents} = State#state.file,
-    {reply, {ok, FileName, Contents}, State#state{file = unallocated}};
+    {_, File} = State#state.add_info,
+    #file{name = FileName, contents = Contents} = File,
+    {reply, {ok, FileName, Contents}, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({notify, Notif}, State) ->
-    TS = os:timestamp(),
-    io:format("<~p>: ~p~n", [TS, Notif]),
-    {noreply, State};
-handle_cast({give, FileName, Chunk}, #state{view = View} = State)
+handle_cast({add_status, FileName, Status}, #state{add_info = Add} = State)
+  when Add /= unallocated ->
+    {_From, File} = Add,
+    AddingFileName = File#file.name,
+    case AddingFileName == FileName of
+        false -> {noreply, State};
+        true ->
+            do_status(Status, Add, State)
+    end;
+handle_cast({give, FileName, Chunk}, #state{view_info = View} = State)
   when View /= unallocated ->
     {ViewingFileName, Chunks, From} = View,
     case ViewingFileName == FileName of
         false -> {noreply, State};
         true ->
-            do_give(FileName, [Chunk | Chunks], From, State)
+            case chunk_collected(Chunk, Chunks) of
+                true ->
+                    %% We have already received the chunk and can ignore it
+                    {noreply, State};
+                false ->
+                    %% Otherwise, we will try to verify and return
+                    do_give(FileName, [Chunk | Chunks], From, State)
+            end
     end;
 handle_cast(_Req, State) ->
     {noreply, State}.
 
+do_status(Status, {From, File}, State) ->
+    From ! {status, File#file.name, Status},
+    {noreply, State#state{add_info = unallocated}}.
 
 %% Chunks is guarenteed to have size > 0
 do_give(FileName, Chunks0, From, State) ->
@@ -132,10 +163,10 @@ do_give(FileName, Chunks0, From, State) ->
         true ->
             File = mk_file(FileName, Chunks),
             From ! {file, File},
-            {noreply, State#state{view = unallocated}};
+            {noreply, State#state{view_info = unallocated}};
         _ ->
             View = {FileName, Chunks, From},
-            {noreply, State#state{view = View}}
+            {noreply, State#state{view_info = View}}
     end.
 
 verify_hashes(Chunks) ->
@@ -161,3 +192,10 @@ sort_chunks(Chunks) ->
             Chunk1#chunk.position < Chunk2#chunk.position
           end,
     lists:sort(Fun, Chunks).
+
+chunk_collected(Chunk, Chunks) ->
+    ChunkHashes = lists:map(fun(CurChunk) ->
+                                  CurChunk#chunk.hash
+                            end, Chunks),
+    ChunkHash = Chunk#chunk.hash,
+    lists:member(ChunkHash, ChunkHashes).
