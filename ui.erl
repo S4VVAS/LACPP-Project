@@ -38,15 +38,30 @@
 
 %% FOR THE USER TO USE
 start() ->
-    start(undefined).
-start(ConnectTo) ->
-    Received = gen_server:start(?MODULE, init, [ConnectTo]),
-    case Received of
-        {ok, Pid} ->
-            register(ui, Pid),
-            ok;
-        _ -> error
+    Response = gen_server:start(?MODULE, [undefined], []),
+    case Response of
+        {ok, UIPid} ->
+            register(pui, UIPid),
+            up_and_running;
+        _ -> failed_to_start
     end.
+
+start(EndPoint) ->
+    Response = gen_server:start(?MODULE, [EndPoint], []),
+    case Response of
+        {ok, UIPid} ->
+            register(pui, UIPid),
+            up_and_running;
+        _ -> failed_to_start
+    end.
+
+init([undefined]) ->
+    {ok, Node} = node:start({create}),
+    {ok, #state{node = Node}};
+init([EndPoint]) ->
+    {ok, Node} = node:start({connect, EndPoint, ?DEFAULT_DEPTH}),
+    {ok, #state{node = Node}}.
+
 
 add(UIPid, FileName, Contents) ->
     case gen_server:call(UIPid, {add, FileName, Contents}) of
@@ -88,12 +103,6 @@ add_status(UIPid, FileName, Status) ->
 give_chunk(UIPid, FileName, Chunk) ->
     gen_server:cast(UIPid, {give, FileName, Chunk}).
 
-init(undefined) ->
-    {ok, Node} = node:start(create),
-    {ok, #state{node = Node}};
-init(ConnectTo) ->
-    {ok, Node} = node:start({connect, ConnectTo, ?DEFAULT_DEPTH}),
-    {ok, #state{node = Node}}.
 
 handle_call(node, _From, #state{node = Node} = State) ->
     {reply, {ok, Node}, State};
