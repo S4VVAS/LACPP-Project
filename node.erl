@@ -92,15 +92,17 @@
 
 %% We are creating the first node of our network so we just initiate it
 start(create) ->
-    gen_server:start(?MODULE, [], []);
+    {ok, Pid} = gen_server:start(?MODULE, [], []),
+    register(comService, Pid);
 %% Otherwise, we will need to specify any endpoint of the network and connect
 %% through that point. We initiate our node and then we connect to the network
 %% to some level of Depth.
 start({connect, To, Depth}) ->
     {ok, Pid} = gen_server:start(?MODULE, [], []),
-    gen_server:cast(Pid, {connect, Depth, To}),
+    register(comService, Pid),
+    net_kernel:connect_node(To),
+    %gen_server:cast(Pid, {connect, Depth, To}),
     {ok, Pid}.
-
 
 %% Initiate a node
 init([]) ->
@@ -162,7 +164,7 @@ do_register(Pid, #state{neighbours = Neighbours} = State) ->
 %% it WILL terminate
 do_connect(Depth, ToPid, #state{pid = Pid} = State) ->
     %% We first get the neighbours of the node we want to connect to
-    {ok, Neighbours} = gen_server:call(ToPid, {register, Pid}),
+    {ok, Neighbours} = gen_server:call({comService, ToPid}, {register, Pid}),
 
     %% This function will add any new neighbours to our local record and
     %% then queue a call to connect to those nodes as well if our Depth is
@@ -264,7 +266,7 @@ do_ready(HId, RMap, Path,
     Allocated =lists:foldl(
                      fun({_, _, Reserved, _}, Max) -> max(Reserved, Max) end,
                      0, Rmvd),
- 
+
     %% Return the allocated amount to our available memory
     QMem1 = QMem - Allocated,
 
@@ -300,7 +302,7 @@ start_add(UIPid, RSize, #state{pid = MyPid, id = Id} = State) ->
 
     %% When the reserve phases finishes it will automatically invoke continue_add
     %% so we can just let our calling node that we have started to reserve things
-    
+
     %% Keep track of our current timestamp for the sake of timingout from
     %% reserve
     TS = os:timestamp(),
@@ -368,7 +370,7 @@ do_notify(From, #state{add_info = {UIPid, FileName, TS, Pids}} = State) ->
                 _ ->
                     Pids
             end,
-   
+
     %% We then check if this add has timedout yet, and if not then we check
     %% if we have all nodes responding they have prepared
     case {not misc:timedout(TS, ?PREPARE_TIMEOUT),
@@ -456,7 +458,7 @@ clean(#state{add_info = {UIPid, TS}} = State) ->
     end;
 clean(State) ->
     do_clean(State).
-        
+
 do_clean(#state{candidate = {_CSize, C},
                 queued = Q, queued_mem = QMem} = State) ->
     %% Removed the timedout out commits in our candidate database
