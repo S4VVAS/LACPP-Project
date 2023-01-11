@@ -5,7 +5,7 @@
 %% gen_server behaviour exports
 -export([init/1, handle_call/3, handle_cast/2]).
 
--export([start/1, start/2, add/3, view/2]).
+-export([start/1, add/3, view/2]).
 
 -export([add_status/3, request_file/1, get_endpoint/1, give_chunk/3]).
 
@@ -37,14 +37,13 @@
        ).
 
 %% FOR THE USER TO USE
-start(Alias) ->
-    gen_server:start(?MODULE, [Alias, undefined], []).
-
-start(Alias, {ui, UIPid}) ->
+start(create) ->
+    gen_server:start(?MODULE, create, []);
+start({ui, UIPid}) ->
     {ok, UINode} = ui:get_endpoint(UIPid),
-    start(Alias, UINode);
-start(Alias, EndPoint) ->
-    gen_server:start(?MODULE, [Alias, EndPoint], []).
+    start({connect, UINode});
+start({connect, EndPoint}) ->
+    gen_server:start(?MODULE, {connect, EndPoint}, []).
 
 add(UIPid, FileName, Contents) ->
     case gen_server:call(UIPid, {add, FileName, Contents}) of
@@ -89,11 +88,11 @@ add_status(UIPid, FileName, Status) ->
 give_chunk(UIPid, FileName, Chunk) ->
     gen_server:cast(UIPid, {give, FileName, Chunk}).
 
-init([Alias, undefined]) ->
-    {ok, Node} = node:start({create, Alias}),
+init(create) ->
+    {ok, Node} = node:start(create),
     {ok, #state{node = Node}};
-init([Alias, EndPoint]) ->
-    {ok, Node} = node:start({connect, Alias, EndPoint, ?DEFAULT_DEPTH}),
+init({connect, EndPoint}) ->
+    {ok, Node} = node:start({connect, EndPoint, ?DEFAULT_DEPTH}),
     {ok, #state{node = Node}}.
 
 

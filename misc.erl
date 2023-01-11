@@ -2,8 +2,8 @@
 
 -export([compute_hid/2, hash/1, timedout/2]).
 
-compute_hid(Alias, Id) when is_atom(Alias) andalso is_integer(Id) ->
-    Bin = atom_to_binary(Alias),
+compute_hid(Pid, Id) when is_integer(Id) ->
+    Bin = term_to_binary(Pid),
     hash(<<Bin/binary, Id>>).
 
 hash(Bin) ->

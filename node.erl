@@ -69,9 +69,8 @@
 
 %% record definitions
 -record(state,
-        { alias         = undefined
-        , pid           = self()
-        , neighbours    = dict:new()
+        { pid           = self()
+        , neighbours    = []
         , memory        = ?DEFAULT_MEMORY
         , data          = dict:new()
         , candidate     = {0, []}
@@ -92,26 +91,26 @@
        ).
 
 %% We are creating the first node of our network so we just initiate it
-start({create, Alias}) ->
-    gen_server:start(?MODULE, {Alias}, []);
+start(create) ->
+    gen_server:start(?MODULE, [], []);
 %% Otherwise, we will need to specify any endpoint of the network and connect
 %% through that point. We initiate our node and then we connect to the network
 %% to some level of Depth.
-start({connect, Alias, To, Depth}) ->
-    {ok, Pid} = gen_server:start(?MODULE, {Alias}, []),
+start({connect, To, Depth}) ->
+    {ok, Pid} = gen_server:start(?MODULE, [], []),
     gen_server:cast(Pid, {connect, Depth, To}),
     {ok, Pid}.
 
 
 %% Initiate a node
-init({Alias}) ->
-    {ok, #state{alias = Alias}}.
+init([]) ->
+    {ok, #state{}}.
 
 
 
 %% CALL DEFINITION AND BINDINGS
-handle_call({register, Alias, Pid}, _From, State) ->
-    do_register(Alias, Pid, State);
+handle_call({register, Pid}, _From, State) ->
+    do_register(Pid, State);
 handle_call(print, _From, State0) -> %% USED JUST FOR DEBUGGING PURPOSES
     State = clean(State0),
     {reply, {ok, dict:fetch_keys(State#state.neighbours),
@@ -152,41 +151,40 @@ handle_cast(_Req, #state{} = State) ->
 
 
 
-do_register(Alias, Pid,
-            #state{alias = MyAlias, neighbours = Neighbours} = State) ->
+do_register(Pid, #state{neighbours = Neighbours} = State) ->
     %% We first store our new node registering itself
-    Neighbours1 = dict:store(Alias, Pid, Neighbours),
-    %% Then we reply with our current neighbours and our alias for the node
+    Neighbours1 = [Pid | Neighbours],
+    %% Then we reply with our current neighbours for the node
     %% to continue its registration
-    {reply, {ok, MyAlias, Neighbours}, State#state{neighbours = Neighbours1}}.
+    {reply, {ok, Neighbours}, State#state{neighbours = Neighbours1}}.
 
 %% NOTE: if Depth < 0 then we will connect to all searchable nodes and
 %% it WILL terminate
-do_connect(Depth, ToPid, #state{alias = Alias, pid = Pid} = State) ->
+do_connect(Depth, ToPid, #state{pid = Pid} = State) ->
     %% We first get the neighbours of the node we want to connect to
-    {ok, ToAlias, Neighbours} = gen_server:call(ToPid, {register, Alias, Pid}),
+    {ok, Neighbours} = gen_server:call(ToPid, {register, Pid}),
 
     %% This function will add any new neighbours to our local record and
     %% then queue a call to connect to those nodes as well if our Depth is
     %% not reached
-    Fun = fun(Key, Val, Acc) ->
-                  case dict:is_key(Key, Acc) of
+    Fun = fun(Val, Acc) ->
+                  case lists:member(Val, Neighbours) of
                       true ->
                           Acc;
                       false ->
                           gen_server:cast(Pid, {connect, Depth - 1, Val}),
-                          dict:store(Key, Val, Acc)
+                          [Val | Acc]
                   end
           end,
 
     %% We then fold with the function on our received neighbours
-    Neighbours1 = dict:fold(Fun, State#state.neighbours, Neighbours),
+    Neighbours1 = lists:foldl(Fun, State#state.neighbours, Neighbours),
     %% And we record the Pid that we have just requested to our copy
-    Neighbours2 = dict:store(ToAlias, ToPid, Neighbours1),
+    Neighbours2 = [ToPid | Neighbours1],
     {noreply, State#state{neighbours = Neighbours2}}.
 
 do_reserve(HId, Visited, RemSize, ChunkSize,
-           #state{alias = MyAlias, pid = MyPid, queued = Q,
+           #state{pid = MyPid, queued = Q,
                   queued_mem = QMem, memory = Mem,
                   candidate = {CSize, _C}} = State) ->
 
@@ -217,9 +215,9 @@ do_reserve(HId, Visited, RemSize, ChunkSize,
     Q = State#state.queued,
     Q1 = case 0 < ToStore andalso 0 < RemSize of
              true ->
-                 FromAlias = hd(Visited),
+                 FromPid = hd(Visited),
                  TS = os:timestamp(),
-                 [{HId, FromAlias, ToStore, TS} | Q];
+                 [{HId, FromPid, ToStore, TS} | Q];
              false ->
                  Q
          end,
@@ -229,18 +227,18 @@ do_reserve(HId, Visited, RemSize, ChunkSize,
     case 0 < RemSize1 of
         true ->
             %% Define our recursive reserve function call
-            Fun = fun(Alias, Pid) ->
-                    case lists:member(Alias, Visited) of
+            Fun = fun(Pid) ->
+                    case lists:member(Pid, Visited) of
                         true ->
                             skip;
                         false ->
                             gen_server:cast(Pid, {reserve,
-                                                  {HId, [MyAlias| Visited]},
+                                                  {HId, [MyPid | Visited]},
                                                   RemSize1, ChunkSize})
                     end
                   end,
             %% Visit the unvisited nodes
-            dict:map(Fun, State#state.neighbours);
+            lists:foreach(Fun, State#state.neighbours);
         false ->
             %% We have allocated enough and can return
             gen_server:cast(MyPid, {ready, HId, [], Visited})
@@ -249,11 +247,10 @@ do_reserve(HId, Visited, RemSize, ChunkSize,
     {noreply, clean(State1)}.
 
 do_ready(HId, RMap, Path,
-         #state{alias = MyAlias, id = Id, pid = MyPid, queued = Q,
-                queued_mem = QMem, neighbours = Neighbours} = State) ->
+         #state{id = Id, pid = MyPid, queued = Q, queued_mem = QMem} = State) ->
 
     %% We take a step on our path
-    FromAlias = hd(Path),
+    FromPid = hd(Path),
     Rest = tl(Path),
     %% Then we want to find our parent in Q
     PossibleQ = lists:filter(
@@ -272,19 +269,18 @@ do_ready(HId, RMap, Path,
     QMem1 = QMem - Allocated,
 
     State1 = State#state{queued = Q1, queued_mem = QMem1},
-    MyHId = misc:compute_hid(MyAlias, Id),
-    case lists:keyfind(FromAlias, 2, PossibleQ) of
-        {_HId, _FromAlias, ToStore, _TS} when MyHId == HId ->
+    MyHId = misc:compute_hid(MyPid, Id),
+    case lists:keyfind(FromPid, 2, PossibleQ) of
+        {_HId, _FromPid, ToStore, _TS} when MyHId == HId ->
             %% We have an RMap path that is allocated and are at the adding
             %% node again, we can now continue the add phase
             RMap1 = [{MyPid, ToStore} | RMap],
             continue_add(RMap1, State1);
-        {_HId, _FromAlias, ToStore, _TS} ->
+        {_HId, _FromPid, ToStore, _TS} ->
             %% Great, we are on a path that hasn't been returned yet
             %% Then we will recurse
             RMap1 = [{MyPid, ToStore} | RMap],
-            {ok, Pid} = dict:find(FromAlias, Neighbours),  %% FIXME
-            gen_server:cast(Pid, {ready, HId, RMap1, Rest}),
+            gen_server:cast(FromPid, {ready, HId, RMap1, Rest}),
             {noreply, clean(State1)};
         _ ->
             %% Either we have a faulty call, or this parent has
@@ -296,11 +292,11 @@ do_ready(HId, RMap, Path,
 %% We are currently already adding a file from this node
 start_add(_, _, State) when State#state.add_info /= available ->
        {reply, not_available, clean(State)};
-start_add(UIPid, RSize, #state{alias = MyAlias, pid = Pid, id = Id} = State) ->
+start_add(UIPid, RSize, #state{pid = MyPid, id = Id} = State) ->
     %% We first want to reserve nodes of our network for the transaction to
     %% take place
-    HId = misc:compute_hid(MyAlias, Id),
-    gen_server:cast(Pid, {reserve, {HId, [MyAlias]}, RSize, ?MAX_CHUNK}),
+    HId = misc:compute_hid(MyPid, Id),
+    gen_server:cast(MyPid, {reserve, {HId, [MyPid]}, RSize, ?MAX_CHUNK}),
 
     %% When the reserve phases finishes it will automatically invoke continue_add
     %% so we can just let our calling node that we have started to reserve things
@@ -440,9 +436,9 @@ do_view(UIPid, FileName, Visited, #state{neighbours = Neighbours,
     end,
 
     %% Then, we recursively invoke on our unvisited neighbours
-    Visited1 = dict:fetch_keys(Neighbours) ++ Visited,
-    dict:map(fun(Alias, Pid) ->
-                case lists:member(Alias, Visited) of
+    Visited1 = Neighbours ++ Visited,
+    lists:foreach(fun(Pid) ->
+                case lists:member(Pid, Visited) of
                     true -> skip;
                     false ->
                         gen_server:cast(Pid, {view, UIPid, FileName, Visited1})
