@@ -110,7 +110,6 @@ init([]) ->
     {ok, #state{}}.
 
 
-
 %% CALL DEFINITION AND BINDINGS
 handle_call({register, Pid}, _From, State) ->
     do_register(Pid, State);

@@ -5,7 +5,7 @@
 %% gen_server behaviour exports
 -export([init/1, handle_call/3, handle_cast/2]).
 
--export([start/0, start/1, add/3, view/2]).
+-export([start/0, start/1, add/2, view/1]).
 
 -export([add_status/3, request_file/1, give_chunk/3]).
 
@@ -63,8 +63,10 @@ init([EndPoint]) ->
     {ok, #state{node = Node}}.
 
 
-add(UIPid, FileName, Contents) ->
-    case gen_server:call(UIPid, {add, FileName, Contents}) of
+add(FileName, Contents) ->
+    BinFileName = list_to_binary(FileName),
+    BinContents = list_to_binary(Contents),
+    case gen_server:call(pui, {add, BinFileName, BinContents}) of
         started_adding ->
             receive {status, FileName, Status} ->
                         {FileName, Status};
@@ -78,8 +80,9 @@ add(UIPid, FileName, Contents) ->
     end.
 
 
-view(UIPid, FileName) ->
-    case gen_server:call(UIPid, {view, FileName}) of
+view(FileName) ->
+    BinFileName = list_to_binary(FileName),
+    case gen_server:call(pui, {view, BinFileName}) of
         collecting_file ->
             receive
                 {file, File} ->
