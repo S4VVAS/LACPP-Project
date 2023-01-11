@@ -5,9 +5,9 @@
 %% gen_server behaviour exports
 -export([init/1, handle_call/3, handle_cast/2]).
 
--export([start/1, add/3, view/2]).
+-export([start/0, start/1, add/2, view/1]).
 
--export([add_status/3, request_file/1, get_endpoint/1, give_chunk/3]).
+-export([add_status/3, request_file/1, give_chunk/3]).
 
 -define(DEFAULT_DEPTH, 3).
 -define(VIEW_TIMEOUT, 1000). % In milliseconds
@@ -37,16 +37,36 @@
        ).
 
 %% FOR THE USER TO USE
-start(create) ->
-    gen_server:start(?MODULE, create, []);
-start({ui, UIPid}) ->
-    {ok, UINode} = ui:get_endpoint(UIPid),
-    start({connect, UINode});
-start({connect, EndPoint}) ->
-    gen_server:start(?MODULE, {connect, EndPoint}, []).
+start() ->
+    Response = gen_server:start(?MODULE, [undefined], []),
+    case Response of
+        {ok, UIPid} ->
+            register(pui, UIPid),
+            up_and_running;
+        _ -> failed_to_start
+    end.
 
-add(UIPid, FileName, Contents) ->
-    case gen_server:call(UIPid, {add, FileName, Contents}) of
+start(EndPoint) ->
+    Response = gen_server:start(?MODULE, [EndPoint], []),
+    case Response of
+        {ok, UIPid} ->
+            register(pui, UIPid),
+            up_and_running;
+        _ -> failed_to_start
+    end.
+
+init([undefined]) ->
+    {ok, Node} = node:start({create}),
+    {ok, #state{node = Node}};
+init([EndPoint]) ->
+    {ok, Node} = node:start({connect, EndPoint, ?DEFAULT_DEPTH}),
+    {ok, #state{node = Node}}.
+
+
+add(FileName, Contents) ->
+    BinFileName = list_to_binary(FileName),
+    BinContents = list_to_binary(Contents),
+    case gen_server:call(pui, {add, BinFileName, BinContents}) of
         started_adding ->
             receive
                 {status, FileName, ok} ->
@@ -69,8 +89,9 @@ add(UIPid, FileName, Contents) ->
     end.
 
 
-view(UIPid, FileName) ->
-    case gen_server:call(UIPid, {view, FileName}) of
+view(FileName) ->
+    BinFileName = list_to_binary(FileName),
+    case gen_server:call(pui, {view, BinFileName}) of
         collecting_file ->
             receive
                 {file, File} ->
@@ -85,9 +106,6 @@ view(UIPid, FileName) ->
             Response
     end.
 
-get_endpoint(UIPid) ->
-    gen_server:call(UIPid, node).
-
 %% USED BY node.erl
 request_file(UIPid) ->
     gen_server:call(UIPid, contents).
@@ -97,13 +115,6 @@ add_status(UIPid, FileName, Status) ->
 
 give_chunk(UIPid, FileName, Chunk) ->
     gen_server:cast(UIPid, {give, FileName, Chunk}).
-
-init(create) ->
-    {ok, Node} = node:start(create),
-    {ok, #state{node = Node}};
-init({connect, EndPoint}) ->
-    {ok, Node} = node:start({connect, EndPoint, ?DEFAULT_DEPTH}),
-    {ok, #state{node = Node}}.
 
 
 handle_call(node, _From, #state{node = Node} = State) ->
