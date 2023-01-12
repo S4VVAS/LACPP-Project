@@ -52,29 +52,27 @@ init([EndPoint]) ->
 
 
 add(UIPid, FileName, Contents) ->
-    BinFileName = list_to_binary(FileName),
-    BinContents = list_to_binary(Contents),
+    BinFileName = misc:convert(FileName),
+    BinContents = misc:convert(Contents),
     case gen_server:call(UIPid, {add, BinFileName, BinContents}) of
         started_adding ->
             receive
                 {status,File,ok} ->
-                    {ok, File};
-                    % FIXME: This thing doesn't work, it always comes back corrupted
-
-                    %% case view(UIPid, FileName) of
-                    %%     {ok,File} ->
-                    %%         {ok, File};
-                    %%     {corrupted_chunks, X} when size(BinContents) < X ->
-                    %%         %% We have a namespace collision. So we will
-                    %%         %% delete and then retry.
-                    %%         %% FIXME we need to add a call to rollback the
-                    %%         %% add of filename
-                    %%         add(UIPid, FileName, Contents);
-                    %%     Error ->
-                    %%         %% FIXME we need to add a call to rollback the
-                    %%         %% add of filename
-                    %%         {corrupted, FileName, Error}
-                    %% end;
+                    Result = view(UIPid, File),
+                    case Result of
+                        {ok,File2} ->
+                            {ok, File2};
+                        {corrupted_chunks, X} when size(BinContents) < X ->
+                            %% We have a namespace collision. So we will
+                            %% delete and then retry.
+                            %% FIXME we need to add a call to rollback the
+                            %% add of filename
+                            add(UIPid, FileName, Contents);
+                        Error ->
+                            %% FIXME we need to add a call to rollback the
+                            %% add of filename
+                            {corrupted, FileName, Error}
+                    end;
                 {status,FileName,Error} ->
                     {fail, FileName, Error}
             after ?ADD_TIMEOUT ->
@@ -86,7 +84,7 @@ add(UIPid, FileName, Contents) ->
     end.
 
 view(UIPid, FileName) ->
-    BinFileName = list_to_binary(FileName),
+    BinFileName = misc:convert(FileName),
     case gen_server:call(UIPid, {view, BinFileName}) of
         collecting_file ->
             receive
