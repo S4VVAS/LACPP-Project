@@ -57,22 +57,25 @@ add(UIPid, FileName, Contents) ->
     case gen_server:call(UIPid, {add, BinFileName, BinContents}) of
         started_adding ->
             receive
-                {status, FileName, ok} ->
-                    case view(UIPid, FileName) of
-                        {ok, File} ->
-                            {ok, File};
-                        {corrupted_chunks, X} when size(BinContents) < X ->
-                            %% We have a namespace collision. So we will
-                            %% delete and then retry.
-                            %% FIXME we need to add a call to rollback the
-                            %% add of filename
-                            add(UIPid, FileName, Contents);
-                        Error ->
-                            %% FIXME we need to add a call to rollback the
-                            %% add of filename
-                            {corrupted, FileName, Error}
-                    end;
-                {status, FileName, Error} ->
+                {status,File,ok} ->
+                    {ok, File};
+                    % FIXME: This thing doesn't work, it always comes back corrupted
+
+                    %% case view(UIPid, FileName) of
+                    %%     {ok,File} ->
+                    %%         {ok, File};
+                    %%     {corrupted_chunks, X} when size(BinContents) < X ->
+                    %%         %% We have a namespace collision. So we will
+                    %%         %% delete and then retry.
+                    %%         %% FIXME we need to add a call to rollback the
+                    %%         %% add of filename
+                    %%         add(UIPid, FileName, Contents);
+                    %%     Error ->
+                    %%         %% FIXME we need to add a call to rollback the
+                    %%         %% add of filename
+                    %%         {corrupted, FileName, Error}
+                    %% end;
+                {status,FileName,Error} ->
                     {fail, FileName, Error}
             after ?ADD_TIMEOUT ->
                       gen_server:cast(UIPid, {timeout, add}),
@@ -81,7 +84,6 @@ add(UIPid, FileName, Contents) ->
         Response ->
             Response
     end.
-
 
 view(UIPid, FileName) ->
     BinFileName = list_to_binary(FileName),
@@ -93,7 +95,7 @@ view(UIPid, FileName) ->
                 Error ->
                     Error
             after ?VIEW_TIMEOUT ->
-                      gen_server:call(UIPid, {timeout, view})
+                    gen_server:call(UIPid, {timeout, view})
             end;
         Response ->
             Response
@@ -139,8 +141,8 @@ handle_call({timeout, Type}, _From, State) ->
                     {reply, timedout, State};
                 {_FileName, Chunks, _} ->
                     case length(Chunks) of
-                        0 -> does_not_exist;
-                        X -> {corrupted_chunks, X}
+                        0 -> {reply, does_not_exist, State};
+                        X -> {reply, {corrupted_chunks, X}, State}
                     end
             end
     end;
