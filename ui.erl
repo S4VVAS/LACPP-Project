@@ -52,15 +52,16 @@ init([EndPoint]) ->
 
 
 add(UIPid, FileName, Contents) ->
-    BinFileName = list_to_binary(FileName),
-    BinContents = list_to_binary(Contents),
+    BinFileName = misc:convert(FileName),
+    BinContents = misc:convert(Contents),
     case gen_server:call(UIPid, {add, BinFileName, BinContents}) of
         started_adding ->
             receive
-                {status, FileName, ok} ->
-                    case view(UIPid, FileName) of
-                        {ok, File} ->
-                            {ok, File};
+                {status,File,ok} ->
+                    Result = view(UIPid, File),
+                    case Result of
+                        {ok,File2} ->
+                            {ok, File2};
                         {corrupted_chunks, X} when size(BinContents) < X ->
                             %% We have a namespace collision. So we will
                             %% delete and then retry.
@@ -72,7 +73,7 @@ add(UIPid, FileName, Contents) ->
                             %% add of filename
                             {corrupted, FileName, Error}
                     end;
-                {status, FileName, Error} ->
+                {status,FileName,Error} ->
                     {fail, FileName, Error}
             after ?ADD_TIMEOUT ->
                       gen_server:cast(UIPid, {timeout, add}),
@@ -82,9 +83,8 @@ add(UIPid, FileName, Contents) ->
             Response
     end.
 
-
 view(UIPid, FileName) ->
-    BinFileName = list_to_binary(FileName),
+    BinFileName = misc:convert(FileName),
     case gen_server:call(UIPid, {view, BinFileName}) of
         collecting_file ->
             receive
@@ -93,7 +93,7 @@ view(UIPid, FileName) ->
                 Error ->
                     Error
             after ?VIEW_TIMEOUT ->
-                      gen_server:call(UIPid, {timeout, view})
+                    gen_server:call(UIPid, {timeout, view})
             end;
         Response ->
             Response
@@ -139,8 +139,8 @@ handle_call({timeout, Type}, _From, State) ->
                     {reply, timedout, State};
                 {_FileName, Chunks, _} ->
                     case length(Chunks) of
-                        0 -> does_not_exist;
-                        X -> {corrupted_chunks, X}
+                        0 -> {reply, does_not_exist, State};
+                        X -> {reply, {corrupted_chunks, X}, State}
                     end
             end
     end;

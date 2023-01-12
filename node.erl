@@ -92,18 +92,27 @@
 
 %% We are creating the first node of our network so we just initiate it
 start({create}) ->
-    {ok, Pid} = gen_server:start(?MODULE, [], []),
-    register(comService, Pid),
+    case whereis(comService) of
+        undefined ->
+            {ok, Pid} = gen_server:start(?MODULE, [], []),
+            register(comService, Pid);
+        _ -> Pid = whereis(comService)
+    end,
     {ok, Pid};
 %% Otherwise, we will need to specify any endpoint of the network and connect
 %% through that point. We initiate our node and then we connect to the network
 %% to some level of Depth.
 start({connect, To, Depth}) ->
-    {ok, Pid} = gen_server:start(?MODULE, [], []),
-    register(comService, Pid),
-    net_kernel:connect_node(To),
-    gen_server:cast(Pid, {connect, Depth, To}),
+    case whereis(comService) of
+        undefined ->
+            {ok, Pid} = gen_server:start(?MODULE, [], []),
+            register(comService, Pid),
+            net_kernel:connect_node(To),
+            gen_server:cast(Pid, {connect, Depth, To});
+        _ -> Pid = whereis(comService)
+    end,
     {ok, Pid}.
+
 
 %% Initiate a node
 init([]) ->
