@@ -191,7 +191,7 @@ do_connect(Depth, ToPid, #state{pid = Pid} = State) ->
     %% We then fold with the function on our received neighbours
     Neighbours1 = lists:foldl(Fun, State#state.neighbours, Neighbours),
     %% And we record the Pid that we have just requested to our copy
-    Neighbours2 = [ToPid | Neighbours1],
+    Neighbours2 = [{comService, ToPid} | Neighbours1],
     {noreply, State#state{neighbours = Neighbours2}}.
 
 do_reserve(HId, Visited, RemSize, ChunkSize,
