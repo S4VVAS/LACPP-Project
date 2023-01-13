@@ -18,6 +18,7 @@
         { add_info  = unallocated
         , node      = undefined
         , view_info = unallocated
+        , remove_info = unallocated
         }
        ).
 
@@ -102,10 +103,10 @@ view(UIPid, FileName) ->
 remove(UIPid, FileName) ->
     BinFileName = misc:convert(FileName),
     case gen_server:call(UIPid, {remove, BinFileName}) of
-        collecting_file ->
+        removing_file ->
             receive
                 {file, File} ->
-                    {ok, File};
+                    {removed, File};
                 Error ->
                     Error
             after ?VIEW_TIMEOUT ->
@@ -115,7 +116,8 @@ remove(UIPid, FileName) ->
             Response
     end.
 
-chunk_removed
+chunk_removed(UIPid, FileName, Chunk) ->
+    gen_server:cast(UIPid, {remove, FileName, Chunk}).
 
 %% USED BY node.erl
 request_file(UIPid) ->

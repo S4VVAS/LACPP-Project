@@ -78,6 +78,7 @@
         , id            = 0
         , queued_mem    = 0
         , add_info      = available
+        , remove_info   = available
         }
        ).
 
@@ -442,7 +443,7 @@ do_commit(FileName, #state{data = Data, candidate = {CSize, C}} = State) ->
 
 start_remove(UIPid, FileName, #state{pid = Pid} = State) ->
     gen_server:cast(Pid, {remove, UIPid, FileName, []}),
-    {reply, collecting_file, State}.
+    {reply, removing_file, State}.
 
 do_remove(UIPid, FileName, Visited, #state{neighbours = Neighbours, data = Data} = State) ->
     case dict:find(FileName, Data) of
