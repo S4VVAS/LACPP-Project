@@ -5,7 +5,7 @@
 %% gen_server behaviour exports
 -export([init/1, handle_call/3, handle_cast/2]).
 
--export([start/0, start/1, add/3, view/2]).
+-export([start/0, start/1, add/3, view/2, remove/2]).
 
 -export([add_status/3, request_file/1, give_chunk/3]).
 
@@ -98,6 +98,24 @@ view(UIPid, FileName) ->
         Response ->
             Response
     end.
+
+remove(UIPid, FileName) ->
+    BinFileName = misc:convert(FileName),
+    case gen_server:call(UIPid, {remove, BinFileName}) of
+        collecting_file ->
+            receive
+                {file, File} ->
+                    {ok, File};
+                Error ->
+                    Error
+            after ?VIEW_TIMEOUT ->
+                    gen_server:call(UIPid, {timeout, view})
+            end;
+        Response ->
+            Response
+    end.
+
+chunk_removed
 
 %% USED BY node.erl
 request_file(UIPid) ->

@@ -132,6 +132,8 @@ handle_call({add, RequiredSize}, {UIPid, _}, State) ->
     start_add(UIPid, RequiredSize, State);
 handle_call({view, FileName}, {UIPid, _}, State) ->
     start_view(UIPid, FileName, State);
+handle_call({remove, FileName}, {UIPid, _}, State) ->
+    start_remove(UIPid, FileName, State);
 handle_call(_Req, _From, #state{} = State) ->
     {reply, ok, State}.
 
@@ -156,6 +158,8 @@ handle_cast({commit, FileName}, State) ->
     do_commit(FileName, State);
 handle_cast({view, UIPid, FileName, Visited}, State) ->
     do_view(UIPid, FileName, Visited, State);
+handle_cast({remove, UIPid, FileName, Visited}, State) ->
+    do_remove(UIPid, FileName, Visited, State);
 handle_cast(_Req, #state{} = State) ->
     {noreply, State}.
 
@@ -432,9 +436,39 @@ do_commit(FileName, #state{data = Data, candidate = {CSize, C}} = State) ->
             {noreply, clean(State1)};
         _ ->
             %% FIXME: This is bad, we timed out locally but not globally
-            %% (shouldn't happen if the TIMEOUT are correctly proportioned
+            %% shouldn't happen if the TIMEOUT are correctly proportioned
             {noreply, clean(State)}
     end.
+
+start_remove(UIPid, FileName, #state{pid = Pid} = State) ->
+    gen_server:cast(Pid, {remove, UIPid, FileName, []}),
+    {reply, collecting_file, State}.
+
+do_remove(UIPid, FileName, Visited, #state{neighbours = Neighbours, data = Data} = State) ->
+    case dict:find(FileName, Data) of
+        error -> skip;
+        {ok, Chunk} ->
+            Data1 = dict:erase(FileName, Data),
+            Amt = size(Chunk#chunk.contents),
+            Mem1 = State#state.memory + Amt,
+            Id1 = State#state.id + 1,
+            State1 = State#state{data = Data1, memory = Mem1, id = Id1},
+            ui:chunk_removed(UIPid, FileName, Chunk),
+            {noreply, clean(State1)};
+        _ ->
+            {noreply, clean(State)}
+    end,
+
+    %% Then, we recursively invoke on our unvisited neighbours
+    Visited1 = Neighbours ++ Visited,
+    lists:foreach(fun(Pid) ->
+                case lists:member(Pid, Visited) of
+                    true -> skip;
+                    false ->
+                        gen_server:cast(Pid, {remove, UIPid, FileName, Visited1})
+                end
+             end, Neighbours),
+    {noreply, State}.
 
 start_view(UIPid, FileName, #state{pid = Pid} = State) ->
     %% We begin our depth first search
